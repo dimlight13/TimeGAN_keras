@@ -1,15 +1,16 @@
 import numpy as np
-from tensorflow.keras import Model
-from tensorflow.keras.layers import Input, Dense, Reshape, Activation, Concatenate, GRU, Embedding
+from keras import Model
+from keras.layers import Input, Dense, Reshape, Activation, Concatenate, GRU, Embedding
 from tqdm import tqdm
-from tensorflow.keras import Model
+from keras import Model
 from tensorflow import function, GradientTape, sqrt, abs, reduce_mean, ones_like, zeros_like, convert_to_tensor
-from tensorflow.keras.losses import BinaryCrossentropy, MeanSquaredError, SparseCategoricalCrossentropy
+from keras.losses import BinaryCrossentropy, MeanSquaredError, CategoricalCrossentropy
 from tensorflow import data as tfdata
 from tensorflow.keras.optimizers import Adam
 from tensorflow import nn
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import load_model
+from keras.models import load_model
+from keras.utils import to_categorical
 
 def create_directory(directory):
     import os
@@ -24,8 +25,8 @@ create_directory(PATH)
 
 class TSGAN:
     def __init__(self, dataset, label, is_train=False):
-        self.label = label
         self.n_classes = np.unique(label).shape[0]
+        self.label = to_categorical(label, num_classes=self.n_classes)
         self.is_train = is_train
         self.data = dataset
         self.latent_dim = int(self.data.shape[1]/4)
@@ -51,7 +52,7 @@ class TSGAN:
         self.final_d_model = self.construct_final_d_model()
         self._mse = MeanSquaredError()
         self._bce = BinaryCrossentropy()
-        self._scce = SparseCategoricalCrossentropy()
+        self._cce = CategoricalCrossentropy()
  
     def save_process(self, epoch):
         self.final_g_model.save(PATH + "g_model_{}.h5".format(epoch))
@@ -81,7 +82,7 @@ class TSGAN:
 
     def construct_final_d_model(self):
         Y_real = self.d_model(self.embedder.output)
-        return Model(inputs=self.embedder.input, outputs=Y_real, name="RealDiscriminator")            
+        return Model(inputs=self.embedder.input, outputs=Y_real, name="FinalDiscriminator")            
 
     def build_supervisor(self):
         in_image = Input(shape=[self.data.shape[1], self.hidden_dim])
@@ -136,10 +137,10 @@ class TSGAN:
         return model
 
     def build_generator(self):
-        in_label = Input(shape=(1,))
+        in_label = Input(shape=(self.n_classes,))
         li = Embedding(self.n_classes, 50)(in_label)
         li = Dense(self.latent_dim)(li)
-        li = Reshape((self.latent_dim, 1))(li)
+        li = Reshape((self.latent_dim, self.n_classes))(li)
 
         in_lat = Input(shape=(self.latent_dim,))
 
@@ -148,7 +149,7 @@ class TSGAN:
         gen = GRU(64, return_sequences=True, activation='tanh')(gen)
 
         merge = Concatenate()([gen, li])
-        gen = Dense(512)(merge)
+        gen = Dense(self.hidden_dim * 4)(merge)
         gen = Reshape((self.data.shape[1], self.hidden_dim))(gen)
 
         out_layer = Activation('sigmoid')(gen)
@@ -159,7 +160,7 @@ class TSGAN:
         return model
 
     def train(self):
-        n_epoch = 1000
+        n_epoch = 1
         n_batch = 64
         learning_rate = 1e-3
         autoencoder_opt = Adam(lr=learning_rate)
@@ -193,27 +194,32 @@ class TSGAN:
                 X_ = next(get_batch_data(self.data, n_windows=self.data.shape[0]))
                 step_e_loss_t0 = self.train_autoencoder(X_, autoencoder_opt)
 
-            self.autoencoder.save(PATH + "autoencoder.h5")
-            self.embedder.save(PATH + "emb_layer.h5")
-            self.recovery.save(PATH + "rec_layer.h5")
+            # self.autoencoder.save(PATH + "autoencoder.h5")
+            # self.embedder.save(PATH + "emb_layer.h5")
+            # self.recovery.save(PATH + "rec_layer.h5")
 
             ## Supervised Network training
             for _ in tqdm(range(n_epoch)):
                 X_ = next(get_batch_data(self.data, n_windows=self.data.shape[0]))
                 step_g_loss_s = self.train_supervisor(X_, supervisor_opt)
             
-            self.supervisor.save(PATH + "supervisor.h5")
+            # self.supervisor.save(PATH + "supervisor.h5")
 
         ## Joint training
         step_g_loss_u = step_g_loss_s = step_g_loss_v = step_e_loss_t0 = step_d_loss = 0
 
         for epoch in tqdm(range(n_epoch)):
+            for _ in range(2):
+                X_ = next(get_batch_data(self.data, n_windows=self.data.shape[0]))
+                Z_ = next(get_batch_noise())
+                label_ = next(get_batch_label(self.label, n_windows=self.data.shape[0]))
+
+                step_g_loss_u, step_g_loss_s, step_g_loss_v = self.train_generator(X_, label_, Z_, generator_opt)
+                step_e_loss_t0 = self.train_embedder(X_, embedder_opt)
+
             X_ = next(get_batch_data(self.data, n_windows=self.data.shape[0]))
             Z_ = next(get_batch_noise())
-            label_ = next(get_batch_label(self.label, n_windows=self.data.shape[0]))
-
-            step_g_loss_u, step_g_loss_s, step_g_loss_v = self.train_generator(X_, label_, Z_, generator_opt)
-            step_e_loss_t0 = self.train_embedder(X_, embedder_opt)
+            label_ = next(get_batch_label(self.label, n_windows=self.data.shape[0]))    
             step_d_loss = self.train_discriminator(X_, label_, Z_, discriminator_opt)
 
             if epoch % 50 == 0:
@@ -221,7 +227,7 @@ class TSGAN:
                 print("epoch = {}, step_g_loss = {}, step_e_loss = {}, step_d_loss = {}".format(
                     epoch, g_loss, step_e_loss_t0, step_d_loss))
 
-                self.save_process(epoch)
+                # self.save_process(epoch)
 
     @function
     def train_embedder(self, x, opt):
@@ -259,14 +265,14 @@ class TSGAN:
             generator_loss_unsupervised = self._bce(y_true=ones_like(y_fake),
                                                     y_pred=y_fake)
 
-            generator_loss_unsupervised_cate = self._scce(y_true=label,
+            generator_loss_unsupervised_cate = self._cce(y_true=label,
                                                     y_pred=y_fake_cate)
 
             y_fake_e, y_fake_e_cate = self.adversarial_embedded([z, label])
             generator_loss_unsupervised_e = self._bce(y_true=ones_like(y_fake_e),
                                                       y_pred=y_fake_e)
 
-            generator_loss_unsupervised_e_cate = self._scce(y_true=label,
+            generator_loss_unsupervised_e_cate = self._cce(y_true=label,
                                                       y_pred=y_fake_e_cate)
 
             gen_loss_unsu = generator_loss_unsupervised + generator_loss_unsupervised_cate
@@ -328,7 +334,7 @@ class TSGAN:
         discriminator_loss_real = self._bce(y_true=ones_like(y_real),
                                             y_pred=y_real)
 
-        discriminator_loss_real_cate = self._scce(y_true=label,
+        discriminator_loss_real_cate = self._cce(y_true=label,
                                             y_pred=y_real_cate)
 
         # Loss on false positives
@@ -336,7 +342,7 @@ class TSGAN:
         discriminator_loss_fake = self._bce(y_true=zeros_like(y_fake),
                                             y_pred=y_fake)
 
-        discriminator_loss_fake_cate = self._scce(y_true=label,
+        discriminator_loss_fake_cate = self._cce(y_true=label,
                                             y_pred=y_fake_cate)
 
         y_fake_e, y_fake_e_cate = self.adversarial_embedded([z, label])
@@ -344,7 +350,7 @@ class TSGAN:
         discriminator_loss_fake_e = self._bce(y_true=zeros_like(y_fake_e),
                                               y_pred=y_fake_e)
 
-        discriminator_loss_fake_e_cate = self._scce(y_true=label,
+        discriminator_loss_fake_e_cate = self._cce(y_true=label,
                                               y_pred=y_fake_e_cate)
 
         alpha = 0.4
