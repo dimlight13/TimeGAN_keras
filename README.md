@@ -1,4 +1,4 @@
-# TimeGANsimple_keras
+# TimeGAN_keras
 
 This repository holds the code for the reimplementation of TimeGAN (Yoon et al., NIPS2019) using Keras. Some of the code was derived from https://github.com/ydataai/ydata-synthetic/tree/d888bcf3cb2c6e5b4f620f7e05816cfe54889d5d and the original implementation.
 
